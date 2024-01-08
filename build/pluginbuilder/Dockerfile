@@ -12,11 +12,12 @@
 ## See the License for the specific language governing permissions and
 ## limitations under the License.
 
-# docker build . --platform="linux/amd64" --file ./Dockerfile --build-arg version=v3.20.0 -t heroiclabs/nakama-pluginbuilder:3.20.0
+# docker build . --file ./Dockerfile --build-arg version=v2.1.1 -t heroiclabs/nakama-pluginbuilder:2.1.1
+# docker build . --file ./Dockerfile --build-arg version="v2.1.1-$(git rev-parse --short HEAD)" -t heroiclabs/nakama-pluginbuilder:"2.1.1-$(git rev-parse --short HEAD)"
 
 FROM golang:1.21.5-bookworm as builder
 
-MAINTAINER MapleBreak <maplbreakgame@gmail.com>
+MAINTAINER Heroic Labs <support@heroiclabs.com>
 
 ARG version
 

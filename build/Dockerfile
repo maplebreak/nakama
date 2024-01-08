@@ -12,7 +12,8 @@
 ## See the License for the specific language governing permissions and
 ## limitations under the License.
 
-# docker build "$PWD" --platform="linux/amd64" --file ./Dockerfile --build-arg commit="$(git rev-parse --short HEAD)" --build-arg version=v3.20.0 -t maplebreak/nakama:3.20.0
+# docker build "$PWD" --build-arg commit="$(git rev-parse --short HEAD)" --build-arg version=v2.1.1 -t heroiclabs/nakama:2.1.1
+# docker build "$PWD" --build-arg commit="$(git rev-parse --short HEAD)" --build-arg version="$(git rev-parse --short HEAD)" -t heroiclabs/nakama-prerelease:"$(git rev-parse --short HEAD)"
 
 FROM golang:1.21.5-bookworm as builder
 
@@ -27,7 +28,7 @@ RUN apt-get update && \
     apt-get -y upgrade && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev git && \
     git config --global advice.detachedHead false && \
-    git clone --quiet --no-checkout https://github.com/maplebreak/nakama /go/build/nakama
+    git clone --quiet --no-checkout https://github.com/heroiclabs/nakama /go/build/nakama
 
 WORKDIR /go/build/nakama
 RUN git checkout --quiet "$commit" && \
@@ -35,7 +36,7 @@ RUN git checkout --quiet "$commit" && \
 
 FROM debian:bookworm-slim
 
-MAINTAINER MapleBreak <maplbreakgame@gmail.com>
+MAINTAINER Heroic Labs <support@heroiclabs.com>
 
 ARG version
 
