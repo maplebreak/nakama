@@ -14,7 +14,7 @@
 
 # docker build . --platform="linux/amd64" --file ./Dockerfile --build-arg version=v3.20.0 -t heroiclabs/nakama-pluginbuilder:3.20.0
 
-FROM golang:1.21.5-bookworm as builder
+FROM golang:1.21.6-bookworm as builder
 
 MAINTAINER MapleBreak <maplbreakgame@gmail.com>
 

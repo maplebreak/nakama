@@ -5,6 +5,18 @@ The format is based on [keep a changelog](http://keepachangelog.com) and this pr
 
 ## [Unreleased]
 
+## [3.20.1] - 2024-02-03
+### Changed
+- Improve handling of messages being sent while session is closing.
+- Build with Go 1.21.6.
+
+### Fixed
+- Skip Google refund handling for deleted users.
+- Fix storage engine version check regression.
+- Fix JavaScript runtime tournament records list owner identifier parameter handling.
+- Fix regression in tournament end active time calculation when it coincides with reset schedule.
+- Better handling of concurrent wallet update operations for the same user.
+
 ## [3.20.0] - 2023-12-15
 ### Changed
 - JavaScript runtime `localcachePut` now only accepts primitive types, other values will throw an error.
