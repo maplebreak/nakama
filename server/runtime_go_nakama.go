@@ -53,7 +53,7 @@ type RuntimeGoNakamaModule struct {
 	leaderboardScheduler LeaderboardScheduler
 	sessionRegistry      SessionRegistry
 	sessionCache         SessionCache
-	statusRegistry       *StatusRegistry
+	statusRegistry       StatusRegistry
 	matchRegistry        MatchRegistry
 	tracker              Tracker
 	metrics              Metrics
@@ -63,10 +63,11 @@ type RuntimeGoNakamaModule struct {
 	node                 string
 	matchCreateFn        RuntimeMatchCreateFunction
 	satori               runtime.Satori
+	fleetManager         runtime.FleetManager
 	storageIndex         StorageIndex
 }
 
-func NewRuntimeGoNakamaModule(logger *zap.Logger, db *sql.DB, protojsonMarshaler *protojson.MarshalOptions, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, leaderboardRankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, sessionCache SessionCache, statusRegistry *StatusRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics Metrics, streamManager StreamManager, router MessageRouter, storageIndex StorageIndex) *RuntimeGoNakamaModule {
+func NewRuntimeGoNakamaModule(logger *zap.Logger, db *sql.DB, protojsonMarshaler *protojson.MarshalOptions, config Config, socialClient *social.Client, leaderboardCache LeaderboardCache, leaderboardRankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, sessionCache SessionCache, statusRegistry StatusRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics Metrics, streamManager StreamManager, router MessageRouter, storageIndex StorageIndex) *RuntimeGoNakamaModule {
 	return &RuntimeGoNakamaModule{
 		logger:               logger,
 		db:                   db,
@@ -824,6 +825,44 @@ func (n *RuntimeGoNakamaModule) LinkSteam(ctx context.Context, userID, username,
 	}
 
 	return LinkSteam(ctx, n.logger, n.db, n.config, n.socialClient, n.tracker, n.router, id, username, token, importFriends)
+}
+
+// @group utils
+// @summary Parses a CRON expression and a timestamp in UTC seconds, and returns the next matching timestamp in UTC seconds.
+// @param expression(type=string) A valid CRON expression in standard format, for example "0 0 * * *" (meaning at midnight).
+// @param timestamp(type=int64) A time value expressed as UTC seconds.
+// @return nextTs(int64) The next UTC seconds timestamp (number) that matches the given CRON expression, and is immediately after the given timestamp.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeGoNakamaModule) CronNext(expression string, timestamp int64) (int64, error) {
+	expr, err := cronexpr.Parse(expression)
+	if err != nil {
+		return 0, errors.New("expects a valid cron string")
+	}
+
+	t := time.Unix(timestamp, 0).UTC()
+	next := expr.Next(t)
+	nextTs := next.UTC().Unix()
+
+	return nextTs, nil
+}
+
+// @group utils
+// @summary Parses a CRON expression and a timestamp in UTC seconds, and returns the previous matching timestamp in UTC seconds.
+// @param expression(type=string) A valid CRON expression in standard format, for example "0 0 * * *" (meaning at midnight).
+// @param timestamp(type=int64) A time value expressed as UTC seconds.
+// @return prevTs(int64) The previous UTC seconds timestamp (number) that matches the given CRON expression, and is immediately before the given timestamp.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeGoNakamaModule) CronPrev(expression string, timestamp int64) (int64, error) {
+	expr, err := cronexpr.Parse(expression)
+	if err != nil {
+		return 0, errors.New("expects a valid cron string")
+	}
+
+	t := time.Unix(timestamp, 0).UTC()
+	next := expr.Last(t)
+	nextTs := next.UTC().Unix()
+
+	return nextTs, nil
 }
 
 // @group utils
@@ -2088,12 +2127,13 @@ func (n *RuntimeGoNakamaModule) StorageIndexList(ctx context.Context, callerID, 
 // @param ctx(type=context.Context) The context object represents information about the server and requester.
 // @param accountUpdates(type=[]*runtime.AccountUpdate) Array of account information to be updated.
 // @param storageWrites(type=[]*runtime.StorageWrite) Array of storage objects to be updated.
+// @param storageDeletes(type=[]*runtime.StorageDelete) Array of storage objects to be deleted.
 // @param walletUpdates(type=[]*runtime.WalletUpdate) Array of wallet updates to be made.
 // @param updateLedger(type=bool, optional=true, default=false) Whether to record this wallet update in the ledger.
 // @return storageWriteOps([]*api.StorageObjectAck) A list of acks with the version of the written objects.
 // @return walletUpdateOps([]*runtime.WalletUpdateResult) A list of wallet updates results.
 // @return error(error) An optional error value if an error occurred.
-func (n *RuntimeGoNakamaModule) MultiUpdate(ctx context.Context, accountUpdates []*runtime.AccountUpdate, storageWrites []*runtime.StorageWrite, walletUpdates []*runtime.WalletUpdate, updateLedger bool) ([]*api.StorageObjectAck, []*runtime.WalletUpdateResult, error) {
+func (n *RuntimeGoNakamaModule) MultiUpdate(ctx context.Context, accountUpdates []*runtime.AccountUpdate, storageWrites []*runtime.StorageWrite, storageDeletes []*runtime.StorageDelete, walletUpdates []*runtime.WalletUpdate, updateLedger bool) ([]*api.StorageObjectAck, []*runtime.WalletUpdateResult, error) {
 	// Process account update inputs.
 	accountUpdateOps := make([]*accountUpdate, 0, len(accountUpdates))
 	for _, update := range accountUpdates {
@@ -2181,6 +2221,37 @@ func (n *RuntimeGoNakamaModule) MultiUpdate(ctx context.Context, accountUpdates 
 		storageWriteOps = append(storageWriteOps, op)
 	}
 
+	// Process storage delete inputs.
+	storageDeleteOps := make(StorageOpDeletes, 0, len(storageDeletes))
+	for _, del := range storageDeletes {
+		if del.Collection == "" {
+			return nil, nil, errors.New("expects collection to be a non-empty string")
+		}
+		if del.Key == "" {
+			return nil, nil, errors.New("expects key to be a non-empty string")
+		}
+		if del.UserID != "" {
+			if _, err := uuid.FromString(del.UserID); err != nil {
+				return nil, nil, errors.New("expects an empty or valid user id")
+			}
+		}
+
+		op := &StorageOpDelete{
+			ObjectID: &api.DeleteStorageObjectId{
+				Collection: del.Collection,
+				Key:        del.Key,
+				Version:    del.Version,
+			},
+		}
+		if del.UserID == "" {
+			op.OwnerID = uuid.Nil.String()
+		} else {
+			op.OwnerID = del.UserID
+		}
+
+		storageDeleteOps = append(storageDeleteOps, op)
+	}
+
 	// Process wallet update inputs.
 	walletUpdateOps := make([]*walletUpdate, len(walletUpdates))
 	for i, update := range walletUpdates {
@@ -2204,7 +2275,7 @@ func (n *RuntimeGoNakamaModule) MultiUpdate(ctx context.Context, accountUpdates 
 		}
 	}
 
-	return MultiUpdate(ctx, n.logger, n.db, n.metrics, accountUpdateOps, storageWriteOps, walletUpdateOps, updateLedger)
+	return MultiUpdate(ctx, n.logger, n.db, n.metrics, accountUpdateOps, storageWriteOps, storageDeleteOps, n.storageIndex, walletUpdateOps, updateLedger)
 }
 
 // @group leaderboards
@@ -4139,4 +4210,8 @@ func (n *RuntimeGoNakamaModule) ChannelIdBuild(ctx context.Context, senderId, ta
 // @return satori(runtime.Satori) The Satori client.
 func (n *RuntimeGoNakamaModule) GetSatori() runtime.Satori {
 	return n.satori
+}
+
+func (n *RuntimeGoNakamaModule) GetFleetManager() runtime.FleetManager {
+	return n.fleetManager
 }

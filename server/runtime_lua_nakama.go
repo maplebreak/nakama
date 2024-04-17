@@ -73,7 +73,7 @@ type RuntimeLuaNakamaModule struct {
 	leaderboardScheduler LeaderboardScheduler
 	sessionRegistry      SessionRegistry
 	sessionCache         SessionCache
-	statusRegistry       *StatusRegistry
+	statusRegistry       StatusRegistry
 	matchRegistry        MatchRegistry
 	tracker              Tracker
 	metrics              Metrics
@@ -94,7 +94,7 @@ type RuntimeLuaNakamaModule struct {
 	satori runtime.Satori
 }
 
-func NewRuntimeLuaNakamaModule(logger *zap.Logger, db *sql.DB, protojsonMarshaler *protojson.MarshalOptions, protojsonUnmarshaler *protojson.UnmarshalOptions, config Config, version string, socialClient *social.Client, leaderboardCache LeaderboardCache, rankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, sessionCache SessionCache, statusRegistry *StatusRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics Metrics, streamManager StreamManager, router MessageRouter, once *sync.Once, localCache *RuntimeLuaLocalCache, storageIndex StorageIndex, matchCreateFn RuntimeMatchCreateFunction, eventFn RuntimeEventCustomFunction, registerCallbackFn func(RuntimeExecutionMode, string, *lua.LFunction), announceCallbackFn func(RuntimeExecutionMode, string)) *RuntimeLuaNakamaModule {
+func NewRuntimeLuaNakamaModule(logger *zap.Logger, db *sql.DB, protojsonMarshaler *protojson.MarshalOptions, protojsonUnmarshaler *protojson.UnmarshalOptions, config Config, version string, socialClient *social.Client, leaderboardCache LeaderboardCache, rankCache LeaderboardRankCache, leaderboardScheduler LeaderboardScheduler, sessionRegistry SessionRegistry, sessionCache SessionCache, statusRegistry StatusRegistry, matchRegistry MatchRegistry, tracker Tracker, metrics Metrics, streamManager StreamManager, router MessageRouter, once *sync.Once, localCache *RuntimeLuaLocalCache, storageIndex StorageIndex, matchCreateFn RuntimeMatchCreateFunction, eventFn RuntimeEventCustomFunction, registerCallbackFn func(RuntimeExecutionMode, string, *lua.LFunction), announceCallbackFn func(RuntimeExecutionMode, string)) *RuntimeLuaNakamaModule {
 	return &RuntimeLuaNakamaModule{
 		logger:               logger,
 		db:                   db,
@@ -154,6 +154,7 @@ func (n *RuntimeLuaNakamaModule) Loader(l *lua.LState) int {
 		"localcache_delete":                  n.localcacheDelete,
 		"localcache_clear":                   n.localcacheClear,
 		"time":                               n.time,
+		"cron_prev":                          n.cronPrev,
 		"cron_next":                          n.cronNext,
 		"sql_exec":                           n.sqlExec,
 		"sql_query":                          n.sqlQuery,
@@ -822,6 +823,36 @@ func (n *RuntimeLuaNakamaModule) cronNext(l *lua.LState) int {
 	}
 	t := time.Unix(ts, 0).UTC()
 	next := expr.Next(t)
+	nextTs := next.UTC().Unix()
+	l.Push(lua.LNumber(nextTs))
+	return 1
+}
+
+// @group utils
+// @summary Parses a CRON expression and a timestamp in UTC seconds, and returns the previous matching timestamp in UTC seconds.
+// @param expression(type=string) A valid CRON expression in standard format, for example "0 0 * * *" (meaning at midnight).
+// @param timestamp(type=number) A time value expressed as UTC seconds.
+// @return prev_ts(number) The previous UTC seconds timestamp (number) that matches the given CRON expression, and is immediately before the given timestamp.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeLuaNakamaModule) cronPrev(l *lua.LState) int {
+	cron := l.CheckString(1)
+	if cron == "" {
+		l.ArgError(1, "expects cron string")
+		return 0
+	}
+	ts := l.CheckInt64(2)
+	if ts == 0 {
+		l.ArgError(1, "expects timestamp in seconds")
+		return 0
+	}
+
+	expr, err := cronexpr.Parse(cron)
+	if err != nil {
+		l.ArgError(1, "expects a valid cron string")
+		return 0
+	}
+	t := time.Unix(ts, 0).UTC()
+	next := expr.Last(t)
 	nextTs := next.UTC().Unix()
 	l.Push(lua.LNumber(nextTs))
 	return 1
@@ -6117,6 +6148,7 @@ func (n *RuntimeLuaNakamaModule) storageDelete(l *lua.LState) int {
 // @summary Update account, storage, and wallet information simultaneously.
 // @param accountUpdates(type=table) List of account information to be updated.
 // @param storageWrites(type=table) List of storage objects to be updated.
+// @param storageDeletes(type=table) A list of storage objects to be deleted.
 // @param walletUpdates(type=table) List of wallet updates to be made.
 // @param updateLedger(type=bool, optional=true, default=false) Whether to record this wallet update in the ledger.
 // @return storageWriteAcks(table) A list of acks with the version of the written objects.
@@ -6377,9 +6409,111 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 		}
 	}
 
+	// Process storage delete inputs.
+	var storageDeleteOps StorageOpDeletes
+	storageDeleteTable := l.OptTable(3, nil)
+	if storageDeleteTable != nil {
+		size := storageDeleteTable.Len()
+		storageDeleteOps = make(StorageOpDeletes, 0, size)
+		conversionError := false
+		storageDeleteTable.ForEach(func(k, v lua.LValue) {
+			if conversionError {
+				return
+			}
+
+			dataTable, ok := v.(*lua.LTable)
+			if !ok {
+				conversionError = true
+				l.ArgError(3, "expects a valid set of storage data")
+				return
+			}
+
+			var userID uuid.UUID
+			d := &api.DeleteStorageObjectId{}
+			dataTable.ForEach(func(k, v lua.LValue) {
+				if conversionError {
+					return
+				}
+
+				switch k.String() {
+				case "collection":
+					if v.Type() != lua.LTString {
+						conversionError = true
+						l.ArgError(3, "expects collection to be string")
+						return
+					}
+					d.Collection = v.String()
+					if d.Collection == "" {
+						conversionError = true
+						l.ArgError(3, "expects collection to be a non-empty string")
+						return
+					}
+				case "key":
+					if v.Type() != lua.LTString {
+						conversionError = true
+						l.ArgError(3, "expects key to be string")
+						return
+					}
+					d.Key = v.String()
+					if d.Key == "" {
+						conversionError = true
+						l.ArgError(3, "expects key to be a non-empty string")
+						return
+					}
+				case "user_id":
+					if v.Type() != lua.LTString {
+						conversionError = true
+						l.ArgError(3, "expects user_id to be string")
+						return
+					}
+					var err error
+					if userID, err = uuid.FromString(v.String()); err != nil {
+						conversionError = true
+						l.ArgError(3, "expects user_id to be a valid ID")
+						return
+					}
+				case "version":
+					if v.Type() != lua.LTString {
+						conversionError = true
+						l.ArgError(3, "expects version to be string")
+						return
+					}
+					d.Version = v.String()
+					if d.Version == "" {
+						conversionError = true
+						l.ArgError(3, "expects version to be a non-empty string")
+						return
+					}
+				}
+			})
+
+			if conversionError {
+				return
+			}
+
+			if d.Collection == "" {
+				conversionError = true
+				l.ArgError(3, "expects collection to be supplied")
+				return
+			} else if d.Key == "" {
+				conversionError = true
+				l.ArgError(3, "expects key to be supplied")
+				return
+			}
+
+			storageDeleteOps = append(storageDeleteOps, &StorageOpDelete{
+				OwnerID:  userID.String(),
+				ObjectID: d,
+			})
+		})
+		if conversionError {
+			return 0
+		}
+	}
+
 	// Process wallet update inputs.
 	var walletUpdates []*walletUpdate
-	walletTable := l.OptTable(3, nil)
+	walletTable := l.OptTable(4, nil)
 	if walletTable != nil {
 		size := walletTable.Len()
 		walletUpdates = make([]*walletUpdate, 0, size)
@@ -6392,7 +6526,7 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 			updateTable, ok := v.(*lua.LTable)
 			if !ok {
 				conversionError = true
-				l.ArgError(3, "expects a valid set of updates")
+				l.ArgError(4, "expects a valid set of updates")
 				return
 			}
 
@@ -6406,20 +6540,20 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 				case "user_id":
 					if v.Type() != lua.LTString {
 						conversionError = true
-						l.ArgError(3, "expects user_id to be string")
+						l.ArgError(4, "expects user_id to be string")
 						return
 					}
 					uid, err := uuid.FromString(v.String())
 					if err != nil {
 						conversionError = true
-						l.ArgError(3, "expects user_id to be a valid ID")
+						l.ArgError(4, "expects user_id to be a valid ID")
 						return
 					}
 					update.UserID = uid
 				case "changeset":
 					if v.Type() != lua.LTTable {
 						conversionError = true
-						l.ArgError(3, "expects changeset to be table")
+						l.ArgError(4, "expects changeset to be table")
 						return
 					}
 					changeset := RuntimeLuaConvertLuaTable(v.(*lua.LTable))
@@ -6428,7 +6562,7 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 						cvi, ok := cv.(int64)
 						if !ok {
 							conversionError = true
-							l.ArgError(3, "expects changeset values to be whole numbers")
+							l.ArgError(4, "expects changeset values to be whole numbers")
 							return
 						}
 						update.Changeset[ck] = cvi
@@ -6436,14 +6570,14 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 				case "metadata":
 					if v.Type() != lua.LTTable {
 						conversionError = true
-						l.ArgError(3, "expects metadata to be table")
+						l.ArgError(4, "expects metadata to be table")
 						return
 					}
 					metadataMap := RuntimeLuaConvertLuaTable(v.(*lua.LTable))
 					metadataBytes, err := json.Marshal(metadataMap)
 					if err != nil {
 						conversionError = true
-						l.ArgError(3, fmt.Sprintf("failed to convert metadata: %s", err.Error()))
+						l.ArgError(4, fmt.Sprintf("failed to convert metadata: %s", err.Error()))
 						return
 					}
 					update.Metadata = string(metadataBytes)
@@ -6461,7 +6595,7 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 
 			if update.Changeset == nil {
 				conversionError = true
-				l.ArgError(3, "expects changeset to be supplied")
+				l.ArgError(4, "expects changeset to be supplied")
 				return
 			}
 
@@ -6472,9 +6606,9 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 		}
 	}
 
-	updateLedger := l.OptBool(4, false)
+	updateLedger := l.OptBool(5, false)
 
-	acks, results, err := MultiUpdate(l.Context(), n.logger, n.db, n.metrics, accountUpdates, storageWriteOps, walletUpdates, updateLedger)
+	acks, results, err := MultiUpdate(l.Context(), n.logger, n.db, n.metrics, accountUpdates, storageWriteOps, storageDeleteOps, n.storageIndex, walletUpdates, updateLedger)
 	if err != nil {
 		l.RaiseError("error running multi update: %v", err.Error())
 		return 0

@@ -50,7 +50,7 @@ type accountUpdate struct {
 	metadata    *wrapperspb.StringValue
 }
 
-func GetAccount(ctx context.Context, logger *zap.Logger, db *sql.DB, statusRegistry *StatusRegistry, userID uuid.UUID) (*api.Account, error) {
+func GetAccount(ctx context.Context, logger *zap.Logger, db *sql.DB, statusRegistry StatusRegistry, userID uuid.UUID) (*api.Account, error) {
 	var displayName sql.NullString
 	var username sql.NullString
 	var avatarURL sql.NullString
@@ -138,7 +138,7 @@ WHERE u.id = $1`
 	}, nil
 }
 
-func GetAccounts(ctx context.Context, logger *zap.Logger, db *sql.DB, statusRegistry *StatusRegistry, userIDs []string) ([]*api.Account, error) {
+func GetAccounts(ctx context.Context, logger *zap.Logger, db *sql.DB, statusRegistry StatusRegistry, userIDs []string) ([]*api.Account, error) {
 	query := `
 SELECT u.id, u.username, u.display_name, u.avatar_url, u.lang_tag, u.location, u.timezone, u.metadata, u.wallet,
 	u.email, u.apple_id, u.facebook_id, u.facebook_instant_game_id, u.google_id, u.gamecenter_id, u.steam_id, u.custom_id, u.edge_count,
@@ -459,6 +459,10 @@ func ExportAccount(ctx context.Context, logger *zap.Logger, db *sql.DB, userID u
 }
 
 func DeleteAccount(ctx context.Context, logger *zap.Logger, db *sql.DB, config Config, leaderboardCache LeaderboardCache, leaderboardRankCache LeaderboardRankCache, sessionRegistry SessionRegistry, sessionCache SessionCache, tracker Tracker, userID uuid.UUID, recorded bool) error {
+	if userID == uuid.Nil {
+		return errors.New("cannot delete the system user")
+	}
+
 	ts := time.Now().UTC().Unix()
 
 	var deleted bool
