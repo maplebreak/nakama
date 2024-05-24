@@ -166,7 +166,7 @@ func main() {
 		startupLogger.Fatal("Failed initializing runtime modules", zap.Error(err))
 	}
 	matchmaker := server.NewLocalMatchmaker(logger, startupLogger, config, router, metrics, runtime)
-	partyRegistry := server.NewLocalPartyRegistry(logger, matchmaker, tracker, streamManager, router, config.GetName())
+	partyRegistry := server.NewLocalPartyRegistry(logger, config, matchmaker, tracker, streamManager, router, config.GetName())
 	tracker.SetPartyJoinListener(partyRegistry.Join)
 	tracker.SetPartyLeaveListener(partyRegistry.Leave)
 
@@ -206,37 +206,7 @@ func main() {
 	// Wait for a termination signal.
 	<-c
 
-	graceSeconds := config.GetShutdownGraceSec()
-
-	// If a shutdown grace period is allowed, prepare a timer.
-	var timer *time.Timer
-	timerCh := make(<-chan time.Time, 1)
-	if graceSeconds != 0 {
-		timer = time.NewTimer(time.Duration(graceSeconds) * time.Second)
-		timerCh = timer.C
-		startupLogger.Info("Shutdown started - use CTRL^C to force stop server", zap.Int("grace_period_sec", graceSeconds))
-	} else {
-		// No grace period.
-		startupLogger.Info("Shutdown started")
-	}
-
-	// Stop any running authoritative matches and do not accept any new ones.
-	select {
-	case <-matchRegistry.Stop(graceSeconds):
-		// Graceful shutdown has completed.
-		startupLogger.Info("All authoritative matches stopped")
-	case <-timerCh:
-		// Timer has expired, terminate matches immediately.
-		startupLogger.Info("Shutdown grace period expired")
-		<-matchRegistry.Stop(0)
-	case <-c:
-		// A second interrupt has been received.
-		startupLogger.Info("Skipping graceful shutdown")
-		<-matchRegistry.Stop(0)
-	}
-	if timer != nil {
-		timer.Stop()
-	}
+	server.HandleShutdown(ctx, logger, matchRegistry, config.GetShutdownGraceSec(), runtime.Shutdown(), c)
 
 	// Signal cancellation to the global runtime context.
 	ctxCancelFn()

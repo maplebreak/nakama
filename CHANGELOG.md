@@ -4,8 +4,19 @@ All notable changes to this project are documented below.
 The format is based on [keep a changelog](http://keepachangelog.com) and this project uses [semantic versioning](http://semver.org).
 
 ## [Unreleased]
+### Added
+- Add runtime support for registering a shutdown hook function.
+- Add support to custom sorting in storage index search.
+- New config options to enforce a single party per user socket.
+
+### Changed
+- When a user is blocked, any DM streams between the blocker and blocked user are torn down.
+- Add confirm dialog to console delete operations.
+- Reduce Console Storage View memory usage.
+
 ### Fixed
 - Ensure Apple receipts with duplicate transaction identifiers are processed cleanly.
+- Fix leaderboard rank cache initialization upon startup.
 
 ## [3.21.1] - 2024-03-22
 ### Added
@@ -1484,4 +1495,3 @@ This release brings a large number of changes and new features to the server. It
 ## [0.10.0] - 2017-01-14
 ### Added
 - Initial public release.
-

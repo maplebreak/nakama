@@ -846,13 +846,17 @@ type Initializer interface {
 	RegisterEventSessionEnd(fn func(ctx context.Context, logger Logger, evt *api.Event)) error
 
 	// Register a new storage index.
-	RegisterStorageIndex(name, collection, key string, fields []string, maxEntries int, indexOnly bool) error
+	RegisterStorageIndex(name, collection, key string, fields []string, sortableFields []string, maxEntries int, indexOnly bool) error
 
 	// RegisterStorageIndexFilter can be used to define a filtering function for a given storage index.
 	RegisterStorageIndexFilter(indexName string, fn func(ctx context.Context, logger Logger, db *sql.DB, nk NakamaModule, write *StorageWrite) bool) error
 
 	// RegisterFleetManager can be used to register a FleetManager implementation that can be retrieved from the runtime using GetFleetManager().
 	RegisterFleetManager(fleetManagerInit FleetManagerInitializer) error
+
+	// RegisterShutdown can be used to register a function that is executed once the server receives a termination signal.
+	// This function only fires if shutdown_grace_sec > 0 and will be terminated early if its execution takes longer than the configured grace seconds.
+	RegisterShutdown(fn func(ctx context.Context, logger Logger, db *sql.DB, nk NakamaModule)) error
 }
 
 type PresenceReason uint8
@@ -1083,7 +1087,7 @@ type NakamaModule interface {
 	StorageRead(ctx context.Context, reads []*StorageRead) ([]*api.StorageObject, error)
 	StorageWrite(ctx context.Context, writes []*StorageWrite) ([]*api.StorageObjectAck, error)
 	StorageDelete(ctx context.Context, deletes []*StorageDelete) error
-	StorageIndexList(ctx context.Context, callerID, indexName, query string, limit int) (*api.StorageObjects, error)
+	StorageIndexList(ctx context.Context, callerID, indexName, query string, limit int, order []string) (*api.StorageObjects, error)
 
 	MultiUpdate(ctx context.Context, accountUpdates []*AccountUpdate, storageWrites []*StorageWrite, storageDeletes []*StorageDelete, walletUpdates []*WalletUpdate, updateLedger bool) ([]*api.StorageObjectAck, []*WalletUpdateResult, error)
 
