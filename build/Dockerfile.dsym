@@ -14,7 +14,7 @@
 
 # docker build "$PWD" --platform="linux/amd64" --file ./Dockerfile.dsym --build-arg commit="$(git rev-parse --short HEAD)" --build-arg version=v3.20.0 -t maplebreak/nakama-dsym:3.20.0
 
-FROM golang:1.21.6-bookworm as builder
+FROM golang:1.22.5-bookworm as builder
 
 ARG commit
 ARG version

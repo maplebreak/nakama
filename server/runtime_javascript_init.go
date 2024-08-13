@@ -113,6 +113,8 @@ func (im *RuntimeJavascriptInitModule) mappings(r *goja.Runtime) map[string]func
 		"registerMatch":                                   im.registerMatch(r),
 		"registerBeforeGetAccount":                        im.registerBeforeGetAccount(r),
 		"registerAfterGetAccount":                         im.registerAfterGetAccount(r),
+		"registerBeforeGetMatchmakerStats":                im.registerBeforeGetMatchmakerStats(r),
+		"registerAfterGetMatchmakerStats":                 im.registerAfterGetMatchmakerStats(r),
 		"registerBeforeUpdateAccount":                     im.registerBeforeUpdateAccount(r),
 		"registerAfterUpdateAccount":                      im.registerAfterUpdateAccount(r),
 		"registerBeforeDeleteAccount":                     im.registerBeforeDeleteAccount(r),
@@ -139,6 +141,8 @@ func (im *RuntimeJavascriptInitModule) mappings(r *goja.Runtime) map[string]func
 		"registerAfterListChannelMessages":                im.registerAfterListChannelMessages(r),
 		"registerBeforeListFriends":                       im.registerBeforeListFriends(r),
 		"registerAfterListFriends":                        im.registerAfterListFriends(r),
+		"registerBeforeListFriendsOfFriends":              im.registerBeforeListFriendsOfFriends(r),
+		"registerAfterListFriendsOfFriends":               im.registerAfterListFriendsOfFriends(r),
 		"registerBeforeAddFriends":                        im.registerBeforeAddFriends(r),
 		"registerAfterAddFriends":                         im.registerAfterAddFriends(r),
 		"registerBeforeDeleteFriends":                     im.registerBeforeDeleteFriends(r),
@@ -356,6 +360,7 @@ func (im *RuntimeJavascriptInitModule) getRegisteredFnIdentifier(r *goja.Runtime
 				return s, nil
 			}
 		}
+
 		if expStat, ok := exp.(*ast.ExpressionStatement); ok {
 			if callExp, ok := expStat.Expression.(*ast.CallExpression); ok {
 				if callee, ok := callExp.Callee.(*ast.DotExpression); ok {
@@ -375,6 +380,8 @@ func (im *RuntimeJavascriptInitModule) getRegisteredFnIdentifier(r *goja.Runtime
 							return modNameArg.Name.String(), nil
 						} else if modNameArg, ok := callExp.ArgumentList[1].(*ast.StringLiteral); ok {
 							return modNameArg.Value.String(), nil
+						} else if modNameArg, ok := callExp.ArgumentList[1].(*ast.DotExpression); ok {
+							return string(modNameArg.Identifier.Name), nil
 						} else {
 							return "", inlinedFunctionError
 						}
@@ -393,6 +400,14 @@ func (im *RuntimeJavascriptInitModule) registerBeforeGetAccount(r *goja.Runtime)
 
 func (im *RuntimeJavascriptInitModule) registerAfterGetAccount(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
 	return im.registerHook(r, RuntimeExecutionModeAfter, "registerAfterGetAccount", "getaccount")
+}
+
+func (im *RuntimeJavascriptInitModule) registerBeforeGetMatchmakerStats(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return im.registerHook(r, RuntimeExecutionModeBefore, "registerBeforeGetMatchmakerStats", "getmatchmakerstats")
+}
+
+func (im *RuntimeJavascriptInitModule) registerAfterGetMatchmakerStats(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return im.registerHook(r, RuntimeExecutionModeAfter, "registerAfterGetMatchmakerStats", "getmatchmakerstats")
 }
 
 func (im *RuntimeJavascriptInitModule) registerBeforeUpdateAccount(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
@@ -497,6 +512,14 @@ func (im *RuntimeJavascriptInitModule) registerBeforeListFriends(r *goja.Runtime
 
 func (im *RuntimeJavascriptInitModule) registerAfterListFriends(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
 	return im.registerHook(r, RuntimeExecutionModeAfter, "registerAfterListFriends", "listfriends")
+}
+
+func (im *RuntimeJavascriptInitModule) registerBeforeListFriendsOfFriends(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return im.registerHook(r, RuntimeExecutionModeBefore, "registerBeforeListFriendsOfFriends", "listfriendsoffriends")
+}
+
+func (im *RuntimeJavascriptInitModule) registerAfterListFriendsOfFriends(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return im.registerHook(r, RuntimeExecutionModeAfter, "registerAfterListFriendsOfFriends", "listfriendsoffriends")
 }
 
 func (im *RuntimeJavascriptInitModule) registerBeforeAddFriends(r *goja.Runtime) func(goja.FunctionCall) goja.Value {
@@ -1722,14 +1745,23 @@ func (im *RuntimeJavascriptInitModule) getMatchHookFnIdentifier(r *goja.Runtime,
 						}
 
 						for _, prop := range obj.Value {
-							key, _ := prop.(*ast.PropertyKeyed).Key.(*ast.StringLiteral)
-							if key.Literal == string(matchfnId) {
-								if sl, ok := prop.(*ast.PropertyKeyed).Value.(*ast.StringLiteral); ok {
-									return sl.Literal, nil
-								} else if id, ok := prop.(*ast.PropertyKeyed).Value.(*ast.Identifier); ok {
-									return id.Name.String(), nil
-								} else {
-									return "", inlinedFunctionError
+							if propKeyed, ok := prop.(*ast.PropertyKeyed); ok {
+								if key, ok := propKeyed.Key.(*ast.StringLiteral); ok {
+									if key.Literal == string(matchfnId) {
+										if sl, ok := propKeyed.Value.(*ast.StringLiteral); ok {
+											return sl.Literal, nil
+										} else if id, ok := propKeyed.Value.(*ast.Identifier); ok {
+											return id.Name.String(), nil
+										} else {
+											return "", inlinedFunctionError
+										}
+									}
+								}
+							}
+
+							if propShort, ok := prop.(*ast.PropertyShort); ok {
+								if string(propShort.Name.Name) == string(matchfnId) {
+									return string(propShort.Name.Name), nil
 								}
 							}
 						}

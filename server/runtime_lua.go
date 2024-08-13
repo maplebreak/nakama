@@ -197,6 +197,14 @@ func NewRuntimeProviderLua(ctx context.Context, logger, startupLogger *zap.Logge
 						}
 						return nil, 0
 					}
+				case "getmatchmakerstats":
+					beforeReqFunctions.beforeGetMatchmakerStatsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string) (error, codes.Code) {
+						_, err, code := runtimeProviderLua.BeforeReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, nil)
+						if err != nil {
+							return err, code
+						}
+						return nil, 0
+					}
 				case "updateaccount":
 					beforeReqFunctions.beforeUpdateAccountFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, in *api.UpdateAccountRequest) (*api.UpdateAccountRequest, error, codes.Code) {
 						result, err, code := runtimeProviderLua.BeforeReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, in)
@@ -316,6 +324,14 @@ func NewRuntimeProviderLua(ctx context.Context, logger, startupLogger *zap.Logge
 							return nil, err, code
 						}
 						return result.(*api.ListFriendsRequest), nil, 0
+					}
+				case "listfriendsoffriends":
+					beforeReqFunctions.beforeListFriendsOfFriendsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, in *api.ListFriendsOfFriendsRequest) (*api.ListFriendsOfFriendsRequest, error, codes.Code) {
+						result, err, code := runtimeProviderLua.BeforeReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, in)
+						if result == nil || err != nil {
+							return nil, err, code
+						}
+						return result.(*api.ListFriendsOfFriendsRequest), nil, 0
 					}
 				case "addfriends":
 					beforeReqFunctions.beforeAddFriendsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, in *api.AddFriendsRequest) (*api.AddFriendsRequest, error, codes.Code) {
@@ -819,6 +835,10 @@ func NewRuntimeProviderLua(ctx context.Context, logger, startupLogger *zap.Logge
 					afterReqFunctions.afterGetAccountFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, out *api.Account) error {
 						return runtimeProviderLua.AfterReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, out, nil)
 					}
+				case "getmatchmakerstats":
+					afterReqFunctions.afterGetMatchmakerStatsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, out *api.MatchmakerStats) error {
+						return runtimeProviderLua.AfterReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, out, nil)
+					}
 				case "updateaccount":
 					afterReqFunctions.afterUpdateAccountFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, in *api.UpdateAccountRequest) error {
 						return runtimeProviderLua.AfterReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, nil, in)
@@ -877,6 +897,10 @@ func NewRuntimeProviderLua(ctx context.Context, logger, startupLogger *zap.Logge
 					}
 				case "listfriends":
 					afterReqFunctions.afterListFriendsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, out *api.FriendList) error {
+						return runtimeProviderLua.AfterReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, out, nil)
+					}
+				case "listfriendsoffriends":
+					afterReqFunctions.afterListFriendsOfFriendsFunction = func(ctx context.Context, logger *zap.Logger, userID, username string, vars map[string]string, expiry int64, clientIP, clientPort string, out *api.FriendsOfFriendsList) error {
 						return runtimeProviderLua.AfterReq(ctx, id, logger, userID, username, vars, expiry, clientIP, clientPort, out, nil)
 					}
 				case "addfriends":
@@ -1201,6 +1225,11 @@ func NewRuntimeProviderLua(ctx context.Context, logger, startupLogger *zap.Logge
 			loadedTable.Metatable = vm.GetField(stateRegistry, "_LOADED")
 			vm.SetField(stateRegistry, "_LOADED", loadedTable)
 
+			// Metatable for literal string object.
+			vm.Push(vm.NewFunction(lua.OpenString))
+			vm.Push(lua.LString(lua.StringLibName))
+			vm.Call(1, 0)
+
 			r := &RuntimeLua{
 				logger:    logger,
 				node:      config.GetName(),
@@ -1327,7 +1356,6 @@ func (rp *RuntimeProviderLua) Rpc(ctx context.Context, id string, headers, query
 	r.vm.SetContext(vmCtx)
 	result, fnErr, code, isCustomErr := r.InvokeFunction(RuntimeExecutionModeRPC, lf, headers, queryParams, userID, username, vars, expiry, sessionID, clientIP, clientPort, lang, payload)
 	r.vm.SetContext(context.Background())
-	rp.Put(r)
 
 	if fnErr != nil {
 		if !isCustomErr {
@@ -1341,8 +1369,11 @@ func (rp *RuntimeProviderLua) Rpc(ctx context.Context, id string, headers, query
 			code = 13
 		}
 
-		return "", clearFnError(fnErr, rp, lf), code
+		err = clearFnError(fnErr, rp, lf)
+		rp.Put(r) // don't return VM until error originated in that VM is processed
+		return "", err, code
 	}
+	rp.Put(r)
 
 	if result == nil {
 		return "", nil, 0
@@ -1385,7 +1416,6 @@ func (rp *RuntimeProviderLua) BeforeRt(ctx context.Context, id string, logger *z
 	r.vm.SetContext(vmCtx)
 	result, fnErr, _, isCustomErr := r.InvokeFunction(RuntimeExecutionModeBefore, lf, nil, nil, userID, username, vars, expiry, sessionID, clientIP, clientPort, lang, envelopeMap)
 	r.vm.SetContext(context.Background())
-	rp.Put(r)
 
 	if fnErr != nil {
 		if !isCustomErr {
@@ -1394,8 +1424,11 @@ func (rp *RuntimeProviderLua) BeforeRt(ctx context.Context, id string, logger *z
 			logger.Error("Runtime Before function caused an error.", zap.String("id", id), zap.Error(fnErr))
 		}
 
-		return nil, clearFnError(fnErr, rp, lf)
+		err = clearFnError(fnErr, rp, lf)
+		rp.Put(r) // don't return VM until error originated in that VM is processed
+		return nil, err
 	}
+	rp.Put(r)
 
 	if result == nil {
 		return nil, nil
@@ -1459,7 +1492,6 @@ func (rp *RuntimeProviderLua) AfterRt(ctx context.Context, id string, logger *za
 	r.vm.SetContext(vmCtx)
 	_, fnErr, _, isCustomErr := r.InvokeFunction(RuntimeExecutionModeAfter, lf, nil, nil, userID, username, vars, expiry, sessionID, clientIP, clientPort, lang, outMap, inMap)
 	r.vm.SetContext(context.Background())
-	rp.Put(r)
 
 	if fnErr != nil {
 		if !isCustomErr {
@@ -1468,8 +1500,11 @@ func (rp *RuntimeProviderLua) AfterRt(ctx context.Context, id string, logger *za
 			logger.Error("Runtime After function caused an error.", zap.String("id", id), zap.Error(fnErr))
 		}
 
-		return clearFnError(fnErr, rp, lf)
+		err = clearFnError(fnErr, rp, lf)
+		rp.Put(r) // don't return VM until error originated in that VM is processed
+		return err
 	}
+	rp.Put(r)
 
 	return nil
 }
@@ -1514,7 +1549,6 @@ func (rp *RuntimeProviderLua) BeforeReq(ctx context.Context, id string, logger *
 	r.vm.SetContext(vmCtx)
 	result, fnErr, code, isCustomErr := r.InvokeFunction(RuntimeExecutionModeBefore, lf, nil, nil, userID, username, vars, expiry, "", clientIP, clientPort, "", reqMap)
 	r.vm.SetContext(context.Background())
-	rp.Put(r)
 
 	if fnErr != nil {
 		if !isCustomErr {
@@ -1523,8 +1557,11 @@ func (rp *RuntimeProviderLua) BeforeReq(ctx context.Context, id string, logger *
 			logger.Error("Runtime Before function caused an error.", zap.String("id", id), zap.Error(fnErr))
 		}
 
-		return nil, clearFnError(fnErr, rp, lf), code
+		err = clearFnError(fnErr, rp, lf)
+		rp.Put(r) // don't return VM until error originated in that VM is processed
+		return nil, err, code
 	}
+	rp.Put(r)
 
 	if result == nil || reqMap == nil {
 		// There was no return value, or a return value was not expected (no input to override).
@@ -1607,7 +1644,6 @@ func (rp *RuntimeProviderLua) AfterReq(ctx context.Context, id string, logger *z
 	r.vm.SetContext(vmCtx)
 	_, fnErr, _, isCustomErr := r.InvokeFunction(RuntimeExecutionModeAfter, lf, nil, nil, userID, username, vars, expiry, "", clientIP, clientPort, "", resMap, reqMap)
 	r.vm.SetContext(context.Background())
-	rp.Put(r)
 
 	if fnErr != nil {
 		if !isCustomErr {
@@ -1616,8 +1652,11 @@ func (rp *RuntimeProviderLua) AfterReq(ctx context.Context, id string, logger *z
 			logger.Error("Runtime After function caused an error.", zap.String("id", id), zap.Error(fnErr))
 		}
 
-		return clearFnError(fnErr, rp, lf)
+		err = clearFnError(fnErr, rp, lf)
+		rp.Put(r) // don't return VM until error originated in that VM is processed
+		return err
 	}
+	rp.Put(r)
 
 	return nil
 }
@@ -2387,7 +2426,11 @@ func clearFnError(fnErr error, rp *RuntimeProviderLua, lf *lua.LFunction) error 
 		}
 		return errors.New(msg)
 	}
-	return fnErr
+
+	// fnErr contains reference to the LuaVM we are about to return to pool,
+	// create new error with same error message, but dropping any references
+	// to the Lua VM objects
+	return errors.New(fnErr.Error())
 }
 
 func checkRuntimeLuaVM(logger *zap.Logger, config Config, version string, stdLibs map[string]lua.LGFunction, moduleCache *RuntimeLuaModuleCache) error {

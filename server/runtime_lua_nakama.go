@@ -244,6 +244,8 @@ func (n *RuntimeLuaNakamaModule) Loader(l *lua.LState) int {
 		"notifications_send":                 n.notificationsSend,
 		"notification_send_all":              n.notificationSendAll,
 		"notifications_delete":               n.notificationsDelete,
+		"notifications_get_id":               n.notificationsGetId,
+		"notifications_delete_id":            n.notificationsDeleteId,
 		"wallet_update":                      n.walletUpdate,
 		"wallets_update":                     n.walletsUpdate,
 		"wallet_ledger_update":               n.walletLedgerUpdate,
@@ -256,6 +258,7 @@ func (n *RuntimeLuaNakamaModule) Loader(l *lua.LState) int {
 		"leaderboard_create":                 n.leaderboardCreate,
 		"leaderboard_delete":                 n.leaderboardDelete,
 		"leaderboard_list":                   n.leaderboardList,
+		"leaderboard_ranks_disable":          n.leaderboardRanksDisable,
 		"leaderboard_records_list":           n.leaderboardRecordsList,
 		"leaderboard_records_list_cursor_from_rank": n.leaderboardRecordsListCursorFromRank,
 		"leaderboard_record_write":                  n.leaderboardRecordWrite,
@@ -277,6 +280,7 @@ func (n *RuntimeLuaNakamaModule) Loader(l *lua.LState) int {
 		"tournament_add_attempt":                    n.tournamentAddAttempt,
 		"tournament_join":                           n.tournamentJoin,
 		"tournament_list":                           n.tournamentList,
+		"tournament_ranks_disable":                  n.tournamentRanksDisable,
 		"tournaments_get_id":                        n.tournamentsGetId,
 		"tournament_records_list":                   n.tournamentRecordsList,
 		"tournament_record_write":                   n.tournamentRecordWrite,
@@ -298,6 +302,7 @@ func (n *RuntimeLuaNakamaModule) Loader(l *lua.LState) int {
 		"groups_get_random":                         n.groupsGetRandom,
 		"user_groups_list":                          n.userGroupsList,
 		"friends_list":                              n.friendsList,
+		"friends_of_friends_list":                   n.friendsOfFriendsList,
 		"friends_add":                               n.friendsAdd,
 		"friends_delete":                            n.friendsDelete,
 		"friends_block":                             n.friendsBlock,
@@ -1952,14 +1957,14 @@ func (n *RuntimeLuaNakamaModule) authenticateFacebook(l *lua.LState) int {
 	// Parse create flag, if any.
 	create := l.OptBool(4, true)
 
-	dbUserID, dbUsername, created, importFriendsPossible, err := AuthenticateFacebook(l.Context(), n.logger, n.db, n.socialClient, n.config.GetSocial().FacebookLimitedLogin.AppId, token, username, create)
+	dbUserID, dbUsername, created, err := AuthenticateFacebook(l.Context(), n.logger, n.db, n.socialClient, n.config.GetSocial().FacebookLimitedLogin.AppId, token, username, create)
 	if err != nil {
 		l.RaiseError("error authenticating: %v", err.Error())
 		return 0
 	}
 
 	// Import friends if requested.
-	if importFriends && importFriendsPossible {
+	if importFriends {
 		// Errors are logged before this point and failure here does not invalidate the whole operation.
 		_ = importFacebookFriends(l.Context(), n.logger, n.db, n.tracker, n.router, n.socialClient, uuid.FromStringOrNil(dbUserID), dbUsername, token, false)
 	}
@@ -4823,7 +4828,7 @@ func (n *RuntimeLuaNakamaModule) matchSignal(l *lua.LState) int {
 // @group matches
 // @summary List currently running realtime multiplayer matches and optionally filter them by authoritative mode, label, and current participant count.
 // @param limit(type=number, optional=true, default=1) The maximum number of matches to list.
-// @param authoritative(type=bool, optional=true, default=false) Set true to only return authoritative matches, false to only return relayed matches.
+// @param authoritative(type=bool, optional=true, default=nil) Set true to only return authoritative matches, false to only return relayed matches and nil to return both.
 // @param label(type=string, optional=true, default="") A label to filter authoritative matches by. Default "" means any label matches.
 // @param minSize(type=number, optional=true) Inclusive lower limit of current match participants.
 // @param maxSize(type=number, optional=true) Inclusive upper limit of current match participants.
@@ -5286,6 +5291,100 @@ func (n *RuntimeLuaNakamaModule) notificationsDelete(l *lua.LState) int {
 		if err := NotificationDelete(l.Context(), n.logger, n.db, uid, notificationIDs); err != nil {
 			l.RaiseError(fmt.Sprintf("failed to delete notifications: %s", err.Error()))
 		}
+	}
+
+	return 0
+}
+
+// @group notifications
+// @summary Get notifications by their id.
+// @param ctx(type=context.Context) The context object represents information about the server and requester.
+// @param ids(type=table) A list of notification ids.
+// @param userID(type=string) Optional userID to scope results to that user only.
+// @return notifications(type=table) A list of notifications.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeLuaNakamaModule) notificationsGetId(l *lua.LState) int {
+	notifIdsIn := l.CheckTable(1)
+
+	notifIdsTable, ok := RuntimeLuaConvertLuaValue(notifIdsIn).([]interface{})
+	if !ok {
+		l.ArgError(1, "invalid user ids list")
+		return 0
+	}
+
+	notifIds := make([]string, 0, len(notifIdsTable))
+	for _, id := range notifIdsTable {
+		if ids, ok := id.(string); !ok || ids == "" {
+			l.ArgError(1, "each notification id must be a string")
+			return 0
+		} else if _, err := uuid.FromString(ids); err != nil {
+			l.ArgError(1, "each notification id must be a valid id")
+			return 0
+		} else {
+			notifIds = append(notifIds, ids)
+		}
+	}
+
+	userId := l.OptString(2, "")
+
+	notifications, err := NotificationsGetId(l.Context(), n.logger, n.db, userId, notifIds...)
+	if err != nil {
+		l.RaiseError(fmt.Sprintf("failed to get notifications: %s", err.Error()))
+	}
+
+	notificationsTable := l.CreateTable(len(notifications), 0)
+	for i, notif := range notifications {
+		notifTable := l.CreateTable(0, 7)
+		notifTable.RawSetString("code", lua.LNumber(notif.Code))
+		valueTable := RuntimeLuaConvertMap(l, notif.Content)
+		notifTable.RawSetString("content", valueTable)
+		if notif.Sender != "" {
+			notifTable.RawSetString("sender_id", lua.LString(notif.Sender))
+		}
+		notifTable.RawSetString("subject", lua.LString(notif.Subject))
+		notifTable.RawSetString("user_id", lua.LString(notif.UserID))
+		notifTable.RawSetString("create_time", lua.LNumber(notif.CreateTime.Seconds))
+		notifTable.RawSetString("persistent", lua.LBool(notif.Persistent))
+
+		notificationsTable.RawSetInt(i+1, notifTable)
+	}
+
+	l.Push(notificationsTable)
+
+	return 1
+}
+
+// @group notifications
+// @summary Delete notifications by their id.
+// @param ids(type=table) A list of notification ids.
+// @param userID(type=string) Optional userID to scope deletions to that user only.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeLuaNakamaModule) notificationsDeleteId(l *lua.LState) int {
+	notifIdsIn := l.OptTable(1, nil)
+
+	notifIdsTable, ok := RuntimeLuaConvertLuaValue(notifIdsIn).([]interface{})
+	if !ok {
+		l.ArgError(1, "invalid user ids list")
+		return 0
+	}
+
+	notifIds := make([]string, 0, len(notifIdsTable))
+	for _, id := range notifIdsTable {
+		if ids, ok := id.(string); !ok || ids == "" {
+			l.ArgError(1, "each notification id must be a string")
+			return 0
+		} else if _, err := uuid.FromString(ids); err != nil {
+			l.ArgError(1, "each notification id must be a valid id")
+			return 0
+		} else {
+			notifIds = append(notifIds, ids)
+		}
+	}
+
+	userId := l.OptString(2, "")
+
+	if err := NotificationsDeleteId(l.Context(), n.logger, n.db, userId, notifIds...); err != nil {
+		l.RaiseError("failed to delete notifications: %s", err.Error())
 	}
 
 	return 0
@@ -6694,6 +6793,7 @@ func (n *RuntimeLuaNakamaModule) multiUpdate(l *lua.LState) int {
 // @param operator(type=string, optional=true, default="best") The operator that determines how scores behave when submitted; possible values are "best", "set", or "incr".
 // @param resetSchedule(type=string, optional=true) The cron format used to define the reset schedule for the leaderboard. This controls when a leaderboard is reset and can be used to power daily/weekly/monthly leaderboards.
 // @param metadata(type=table, optional=true) The metadata you want associated to the leaderboard. Some good examples are weather conditions for a racing game.
+// @param enableRanks(type=bool, optional=true, default=false) Whether to enable rank values for the leaderboard.
 // @return error(error) An optional error value if an error occurred.
 func (n *RuntimeLuaNakamaModule) leaderboardCreate(l *lua.LState) int {
 	id := l.CheckString(1)
@@ -6752,7 +6852,9 @@ func (n *RuntimeLuaNakamaModule) leaderboardCreate(l *lua.LState) int {
 		metadataStr = string(metadataBytes)
 	}
 
-	_, created, err := n.leaderboardCache.Create(l.Context(), id, authoritative, sortOrderNumber, operatorNumber, resetSchedule, metadataStr)
+	enableRanks := l.OptBool(7, false)
+
+	_, created, err := n.leaderboardCache.Create(l.Context(), id, authoritative, sortOrderNumber, operatorNumber, resetSchedule, metadataStr, enableRanks)
 	if err != nil {
 		l.RaiseError("error creating leaderboard: %v", err.Error())
 	}
@@ -6835,6 +6937,24 @@ func (n *RuntimeLuaNakamaModule) leaderboardList(l *lua.LState) int {
 		l.Push(lua.LString(list.Cursor))
 	}
 	return 2
+}
+
+// @group leaderboards
+// @param id(type=string) The leaderboard id.
+// @return error(error) An optional error value if an error occurred.
+// @summary Disable a leaderboard rank cache freeing its allocated resources. If already disabled is a NOOP.
+func (n *RuntimeLuaNakamaModule) leaderboardRanksDisable(l *lua.LState) int {
+	id := l.CheckString(1)
+	if id == "" {
+		l.ArgError(1, "expects a leaderboard id string")
+		return 0
+	}
+
+	if err := disableLeaderboardRanks(l.Context(), n.logger, n.db, n.leaderboardCache, n.rankCache, id); err != nil {
+		l.RaiseError(err.Error())
+	}
+
+	return 0
 }
 
 // @group leaderboards
@@ -7413,7 +7533,7 @@ func (n *RuntimeLuaNakamaModule) purchaseGetByTransactionId(l *lua.LState) int {
 		return 0
 	}
 
-	purchase, err := GetPurchaseByTransactionId(l.Context(), n.db, id)
+	purchase, err := GetPurchaseByTransactionId(l.Context(), n.logger, n.db, id)
 	if err != nil {
 		l.RaiseError("error retrieving purchase: %v", err.Error())
 		return 0
@@ -7675,6 +7795,7 @@ func (n *RuntimeLuaNakamaModule) subscriptionsList(l *lua.LState) int {
 // @param maxSize(type=number, optional=true) Maximum size of participants in a tournament.
 // @param maxNumScore(type=number, optional=true, default=1000000) Maximum submission attempts for a tournament record.
 // @param joinRequired(type=bool, optional=true, default=false) Whether the tournament needs to be joined before a record write is allowed.
+// @param enableRanks(type=bool, optional=true, default=false) Whether to enable rank values for the leaderboard.
 // @return error(error) An optional error value if an error occurred.
 func (n *RuntimeLuaNakamaModule) tournamentCreate(l *lua.LState) int {
 	id := l.CheckString(1)
@@ -7767,8 +7888,9 @@ func (n *RuntimeLuaNakamaModule) tournamentCreate(l *lua.LState) int {
 		return 0
 	}
 	joinRequired := l.OptBool(15, false)
+	enableRanks := l.OptBool(16, false)
 
-	if err := TournamentCreate(l.Context(), n.logger, n.leaderboardCache, n.leaderboardScheduler, id, authoritative, sortOrderNumber, operatorNumber, resetSchedule, metadataStr, title, description, category, startTime, endTime, duration, maxSize, maxNumScore, joinRequired); err != nil {
+	if err := TournamentCreate(l.Context(), n.logger, n.leaderboardCache, n.leaderboardScheduler, id, authoritative, sortOrderNumber, operatorNumber, resetSchedule, metadataStr, title, description, category, startTime, endTime, duration, maxSize, maxNumScore, joinRequired, enableRanks); err != nil {
 		l.RaiseError("error creating tournament: %v", err.Error())
 	}
 	return 0
@@ -8223,6 +8345,24 @@ func (n *RuntimeLuaNakamaModule) tournamentList(l *lua.LState) int {
 	}
 
 	return 2
+}
+
+// @group tournaments
+// @param id(type=string) The tournament id.
+// @return error(error) An optional error value if an error occurred.
+// @summary Disable a tournament rank cache freeing its allocated resources. If already disabled is a NOOP.
+func (n *RuntimeLuaNakamaModule) tournamentRanksDisable(l *lua.LState) int {
+	id := l.CheckString(1)
+	if id == "" {
+		l.ArgError(1, "expects a tournament id string")
+		return 0
+	}
+
+	if err := disableLeaderboardRanks(l.Context(), n.logger, n.db, n.leaderboardCache, n.rankCache, id); err != nil {
+		l.RaiseError(err.Error())
+	}
+
+	return 0
 }
 
 // @group tournaments
@@ -9474,6 +9614,63 @@ func (n *RuntimeLuaNakamaModule) friendsList(l *lua.LState) int {
 	} else {
 		l.Push(lua.LString(friends.Cursor))
 	}
+
+	return 2
+}
+
+// @group friends
+// @summary List all friends, invites, invited, and blocked which belong to a user.
+// @param userId(type=string) The ID of the user whose friends, invites, invited, and blocked you want to list.
+// @param limit(type=number, optional=true) The number of friends to retrieve in this page of results. No more than 100 limit allowed per result.
+// @param cursor(type=string, optional=true, default="") Pagination cursor from previous result. Don't set to start fetching from the beginning.
+// @return friendsOfFriends(table) The user information for users that are friends of friends of the current user.
+// @return cursor(string) An optional next page cursor that can be used to retrieve the next page of records (if any). Will be set to "" or nil when fetching last available page.
+// @return error(error) An optional error value if an error occurred.
+func (n *RuntimeLuaNakamaModule) friendsOfFriendsList(l *lua.LState) int {
+	userID, err := uuid.FromString(l.CheckString(1))
+	if err != nil {
+		l.ArgError(1, "expects user ID to be a valid identifier")
+		return 0
+	}
+
+	limit := l.OptInt(2, 100)
+	if limit < 1 || limit > 1000 {
+		l.ArgError(2, "expects limit to be 1-1000")
+		return 0
+	}
+
+	cursor := l.OptString(3, "")
+
+	friends, err := ListFriendsOfFriends(l.Context(), n.logger, n.db, n.statusRegistry, userID, limit, cursor)
+	if err != nil {
+		l.RaiseError("error while trying to list friends of friends for a user: %v", err.Error())
+		return 0
+	}
+
+	userFriendsOfFriends := l.CreateTable(len(friends.FriendsOfFriends), 0)
+	for i, f := range friends.FriendsOfFriends {
+		u := f.User
+
+		fut, err := userToLuaTable(l, u)
+		if err != nil {
+			l.RaiseError(fmt.Sprintf("failed to convert user data to lua table: %s", err.Error()))
+			return 0
+		}
+
+		ft := l.CreateTable(0, 2)
+		ft.RawSetString("referrer", lua.LString(f.Referrer))
+		ft.RawSetString("user", fut)
+
+		userFriendsOfFriends.RawSetInt(i+1, ft)
+	}
+
+	l.Push(userFriendsOfFriends)
+	if friends.Cursor == "" {
+		l.Push(lua.LNil)
+	} else {
+		l.Push(lua.LString(friends.Cursor))
+	}
+
 	return 2
 }
 
@@ -9575,7 +9772,6 @@ func (n *RuntimeLuaNakamaModule) friendsAdd(l *lua.LState) int {
 	}
 
 	return 0
-
 }
 
 // @group friends
